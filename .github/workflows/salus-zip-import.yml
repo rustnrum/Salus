@@ -1,0 +1,93 @@
+name: SALUS - Import ZIP and Build Home
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Salus-Home-Page-SOURCE.zip'
+      - '.github/workflows/salus-zip-import.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Salus
+        uses: actions/checkout@v4
+
+      - name: Validate and unpack ZIP into correct folders
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive='Salus-Home-Page-SOURCE.zip'
+          test -f "$archive"
+          unzip -t "$archive" >/dev/null
+          tempdir="$(mktemp -d)"
+          unzip -q "$archive" -d "$tempdir"
+          source_dir="$tempdir"
+          if test -f "$tempdir/salus/pubspec.yaml"; then
+            source_dir="$tempdir/salus"
+          fi
+          test -f "$source_dir/pubspec.yaml"
+          test -f "$source_dir/lib/main.dart"
+          test -f "$source_dir/lib/home/salus_home_page.dart"
+          # Do not copy embedded workflow files: GITHUB_TOKEN cannot update workflows.
+          # Keep this stable importer while source files are refreshed from the ZIP.
+          rsync -a --exclude='/.github/' "$source_dir/" "$GITHUB_WORKSPACE/"
+          echo 'SALUS Dart/Android files expanded into repository root.'
+
+      - name: Install Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Complete standard Android scaffold
+        run: flutter create --platforms=android --org com.rustnrum --project-name salus .
+
+      - name: Get Flutter dependencies
+        run: flutter pub get
+
+      - name: Analyze Dart
+        run: flutter analyze
+
+      - name: Run Home screen tests
+        run: flutter test test/
+
+      - name: Render folded and unfolded preview screenshots
+        run: flutter test --update-goldens test_goldens/home_snapshots_test.dart
+
+      - name: Compile debug APK
+        run: flutter build apk --debug
+
+      - name: Save APK and screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: SALUS-Home-Preview
+          path: |
+            build/app/outputs/flutter-apk/app-debug.apk
+            test_goldens/goldens/*.png
+          if-no-files-found: error
+
+      - name: Commit unpacked source, remove uploaded ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f Salus-Home-Page-SOURCE.zip
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'Import verified SALUS Home Flutter source'
+            git push origin HEAD:main
+          fi
